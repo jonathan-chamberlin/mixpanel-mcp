@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(mkdir -p /Users/jonathanchamberlin/repos/mixpanel-mcp/.claude/improve-artifacts)",
+      "Bash(rm -f /Users/jonathanchamberlin/repos/mixpanel-mcp/.claude/improve-artifacts/*.md)"
+    ]
+  }
+}

@@ -2,9 +2,14 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 
+const MIXPANEL_API_BASE = "https://mixpanel.com/api/query";
+const SERVER_VERSION = "1.0.0";
+const DEFAULT_EVENT_LIMIT = 10;
+const DEFAULT_EVENT_TYPE = "general" as const;
+
 const server = new McpServer({
     name: "mixpanel",
-    version: "1.0.0"
+    version: SERVER_VERSION
 })
 
 const args = process.argv.slice(2);
@@ -18,6 +23,42 @@ const SERVICE_ACCOUNT_USER_NAME = process.env.SERVICE_ACCOUNT_USER_NAME || args[
 const SERVICE_ACCOUNT_PASSWORD = process.env.SERVICE_ACCOUNT_PASSWORD || args[1] || "YOUR SERVICE ACCOUNT PASSWORD";
 const DEFAULT_PROJECT_ID = process.env.DEFAULT_PROJECT_ID || args[2] || "YOUR PROJECT ID";
 
+function buildAuthHeaders(): Record<string, string> {
+  const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
+  const encodedCredentials = Buffer.from(credentials).toString('base64');
+  return {
+    'accept': 'application/json',
+    'authorization': `Basic ${encodedCredentials}`
+  };
+}
+
+async function mixpanelFetch(url: string, options?: RequestInit): Promise<unknown> {
+  const response = await fetch(url, {
+    method: 'GET',
+    headers: buildAuthHeaders(),
+    ...options
+  });
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
+  }
+  return response.json();
+}
+
+function errorResponse(context: string, error: unknown): { content: Array<{ type: "text"; text: string }>; isError: true } {
+  const message = error instanceof Error ? error.message : String(error);
+  return {
+    content: [{ type: "text", text: `${context}: ${message}` }],
+    isError: true
+  };
+}
+
+function successResponse(data: unknown): { content: Array<{ type: "text"; text: string }> } {
+  return {
+    content: [{ type: "text", text: JSON.stringify(data) }]
+  };
+}
+
 server.tool(
   "get_today_top_events",
   "Get today's top events from Mixpanel. Useful for quickly identifying the most active events happening today, spotting trends, and monitoring real-time user activity.",
@@ -26,54 +67,14 @@ server.tool(
     type: z.enum(["general", "average", "unique"]).describe("The type of events to fetch, either general, average, or unique, defaults to general").optional(),
     limit: z.number().optional().describe("Maximum number of events to return"),
   },
-  async ({ project_id = DEFAULT_PROJECT_ID, type = "general", limit = 10 }) => {
+  async ({ project_id = DEFAULT_PROJECT_ID, type = DEFAULT_EVENT_TYPE, limit = DEFAULT_EVENT_LIMIT }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct URL with query parameters
-      const url = `https://mixpanel.com/api/query/events/top?project_id=${project_id}&type=${type}${limit ? `&limit=${limit}` : ''}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const url = `${MIXPANEL_API_BASE}/events/top?project_id=${project_id}&type=${type}${limit ? `&limit=${limit}` : ''}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel events:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel events: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel events", error);
     }
   }
 )
@@ -90,56 +91,13 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, distinct_ids, from_date, to_date }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct URL with query parameters
-      let url = `https://mixpanel.com/api/query/stream/query?project_id=${project_id}&distinct_ids=${encodeURIComponent(distinct_ids)}&from_date=${from_date}&to_date=${to_date}`;
-      
-      // Add optional workspace_id if provided
-      if (workspace_id) {
-        url += `&workspace_id=${workspace_id}`;
-      }
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      let url = `${MIXPANEL_API_BASE}/stream/query?project_id=${project_id}&distinct_ids=${encodeURIComponent(distinct_ids)}&from_date=${from_date}&to_date=${to_date}`;
+      if (workspace_id) url += `&workspace_id=${workspace_id}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error fetching profile event activity:', error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching profile event activity: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching profile event activity", error);
     }
   }
 );
@@ -152,54 +110,14 @@ server.tool(
     type: z.enum(["general", "average", "unique"]).describe("The type of events to fetch, either general, average, or unique, defaults to general").optional(),
     limit: z.number().optional().describe("Maximum number of events to return"),
   },
-  async ({ project_id = DEFAULT_PROJECT_ID, type = "general", limit = 10 }) => {
+  async ({ project_id = DEFAULT_PROJECT_ID, type = DEFAULT_EVENT_TYPE, limit = DEFAULT_EVENT_LIMIT }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct URL with query parameters
-      const url = `https://mixpanel.com/api/query/events/names?project_id=${project_id}&type=${type}${limit ? `&limit=${limit}` : ''}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const url = `${MIXPANEL_API_BASE}/events/names?project_id=${project_id}&type=${type}${limit ? `&limit=${limit}` : ''}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel events:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel events: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel events", error);
     }
   }
 )
@@ -216,88 +134,42 @@ server.tool(
     from_date: z.string().optional().describe("The date in yyyy-mm-dd format to begin querying from (inclusive)"),
     to_date: z.string().optional().describe("The date in yyyy-mm-dd format to query to (inclusive)"),
   },
-  async ({ project_id = DEFAULT_PROJECT_ID, event, type = "general", unit, interval, from_date, to_date }) => {
+  async ({ project_id = DEFAULT_PROJECT_ID, event, type = DEFAULT_EVENT_TYPE, unit, interval, from_date, to_date }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Validate parameters
       if (!interval && (!from_date || !to_date)) {
         throw new Error("You must specify either interval or both from_date and to_date");
       }
-      
-      // Parse events to ensure it's a valid JSON array
-      let parsedEvents;
+
+      let parsedEvents: unknown;
       try {
         parsedEvents = JSON.parse(event);
         if (!Array.isArray(parsedEvents)) {
           throw new Error("Events must be a JSON array");
         }
-      } catch (e: any) {
-        throw new Error(`Invalid events format: ${e.message}`);
+      } catch (e: unknown) {
+        throw new Error(`Invalid events format: ${e instanceof Error ? e.message : String(e)}`);
       }
-      
-      // Build query parameters
+
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         type: type,
         unit: unit
       });
-      
-      // Add either interval or date range
+
       if (interval) {
         queryParams.append('interval', interval.toString());
       } else {
         queryParams.append('from_date', from_date || '');
         queryParams.append('to_date', to_date || '');
       }
-      
-      // Add events parameter
       queryParams.append('event', event);
-      
-      // Construct URL with query parameters
-      const url = `https://mixpanel.com/api/query/events?${queryParams.toString()}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+
+      const url = `${MIXPANEL_API_BASE}/events?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel event counts:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel event counts: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel event counts", error);
     }
   }
 )
@@ -317,20 +189,14 @@ server.tool(
     to_date: z.string().optional().describe("The date in yyyy-mm-dd format to query to (inclusive)"),
     limit: z.number().optional().describe("The maximum number of values to return (default: 255)"),
   },
-  async ({ project_id = DEFAULT_PROJECT_ID, event, name, values, type = "general", unit, interval, from_date, to_date, limit }) => {
+  async ({ project_id = DEFAULT_PROJECT_ID, event, name, values, type = DEFAULT_EVENT_TYPE, unit, interval, from_date, to_date, limit }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Validate parameters
       if (!interval && (!from_date || !to_date)) {
         throw new Error("You must specify either interval or both from_date and to_date");
       }
-      
-      // Parse values if provided
-      let parsedValues;
+
       if (values) {
+        let parsedValues: unknown;
         try {
           parsedValues = JSON.parse(values);
           if (!Array.isArray(parsedValues)) {
@@ -340,8 +206,7 @@ server.tool(
           throw new Error(`Invalid values format: ${e instanceof Error ? e.message : String(e)}`);
         }
       }
-      
-      // Build query parameters
+
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         event: event,
@@ -349,67 +214,21 @@ server.tool(
         type: type,
         unit: unit
       });
-      
-      // Add values if provided
-      if (values) {
-        queryParams.append('values', values);
-      }
-      
-      // Add either interval or date range
+      if (values) queryParams.append('values', values);
       if (interval) {
         queryParams.append('interval', interval.toString());
       } else {
         queryParams.append('from_date', from_date || '');
         queryParams.append('to_date', to_date || '');
       }
-      
-      // Add limit if provided
-      if (limit) {
-        queryParams.append('limit', limit.toString());
-      }
-      
-      // Construct URL with query parameters
-      const url = `https://mixpanel.com/api/query/events/properties?${queryParams.toString()}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      if (limit) queryParams.append('limit', limit.toString());
+
+      const url = `${MIXPANEL_API_BASE}/events/properties?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel event property values:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel event property values: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel event property values", error);
     }
   }
 )
@@ -424,57 +243,17 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, bookmark_id }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         bookmark_id: bookmark_id
       });
-      
-      if (workspace_id) {
-        queryParams.append('workspace_id', workspace_id);
-      }
-      
-      const url = `https://mixpanel.com/api/query/insights?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      if (workspace_id) queryParams.append('workspace_id', workspace_id);
+      const url = `${MIXPANEL_API_BASE}/insights?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel insights:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel insights: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel insights", error);
     }
   }
 );
@@ -495,61 +274,23 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, funnel_id, from_date, to_date, length, length_unit, interval, unit }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         funnel_id: funnel_id,
         from_date: from_date,
         to_date: to_date
       });
-      
       if (workspace_id) queryParams.append('workspace_id', workspace_id);
       if (length) queryParams.append('length', length.toString());
       if (length_unit) queryParams.append('length_unit', length_unit);
       if (interval) queryParams.append('interval', interval.toString());
       if (unit) queryParams.append('unit', unit);
-      
-      const url = `https://mixpanel.com/api/query/funnels?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const url = `${MIXPANEL_API_BASE}/funnels?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel funnel data:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel funnel data: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel funnel data", error);
     }
   }
 );
@@ -563,56 +304,14 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      const queryParams = new URLSearchParams({
-        project_id: project_id || ''
-      });
-      
-      if (workspace_id) {
-        queryParams.append('workspace_id', workspace_id);
-      }
-      
-      const url = `https://mixpanel.com/api/query/funnels/list?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const queryParams = new URLSearchParams({ project_id: project_id || '' });
+      if (workspace_id) queryParams.append('workspace_id', workspace_id);
+      const url = `${MIXPANEL_API_BASE}/funnels/list?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel funnels list:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel funnels list: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel funnels list", error);
     }
   }
 );
@@ -626,56 +325,14 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      const queryParams = new URLSearchParams({
-        project_id: project_id || ''
-      });
-      
-      if (workspace_id) {
-        queryParams.append('workspace_id', workspace_id);
-      }
-      
-      const url = `https://mixpanel.com/api/query/cohorts/list?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const queryParams = new URLSearchParams({ project_id: project_id || '' });
+      if (workspace_id) queryParams.append('workspace_id', workspace_id);
+      const url = `${MIXPANEL_API_BASE}/cohorts/list?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel cohorts list:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel cohorts list: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel cohorts list", error);
     }
   }
 );
@@ -715,15 +372,11 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, from_date, to_date, retention_type, born_event, event, born_where, return_where, interval, interval_count, unit, on, limit }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         from_date: from_date,
         to_date: to_date
       });
-      
       if (workspace_id) queryParams.append('workspace_id', workspace_id);
       if (retention_type) queryParams.append('retention_type', retention_type);
       if (born_event) queryParams.append('born_event', born_event);
@@ -735,46 +388,12 @@ server.tool(
       if (unit) queryParams.append('unit', unit);
       if (on) queryParams.append('on', on);
       if (limit) queryParams.append('limit', limit.toString());
-      
-      const url = `https://mixpanel.com/api/query/retention?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const url = `${MIXPANEL_API_BASE}/retention?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel retention data:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel retention data: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel retention data", error);
     }
   }
 );
@@ -790,63 +409,27 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, script, params }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct URL with query parameters
       const queryParams = new URLSearchParams();
       queryParams.append('project_id', project_id);
       if (workspace_id) queryParams.append('workspace_id', workspace_id);
-      
-      const url = `https://mixpanel.com/api/query/jql?${queryParams.toString()}`;
-      
-      // Prepare form data for POST request
+      const url = `${MIXPANEL_API_BASE}/jql?${queryParams.toString()}`;
+
       const formData = new URLSearchParams();
       formData.append('script', script);
       if (params) formData.append('params', params);
-      
-      // Set up request options
-      const options = {
+
+      const data = await mixpanelFetch(url, {
         method: 'POST',
         headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`,
+          ...buildAuthHeaders(),
           'content-type': 'application/x-www-form-urlencoded'
         },
         body: formData
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-      
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      });
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error executing JQL query:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error executing JQL query: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error executing JQL query", error);
     }
   }
 );
@@ -873,9 +456,6 @@ server.tool(
   },
   async ({ project_id = DEFAULT_PROJECT_ID, workspace_id, event, from_date, to_date, on, unit, where }) => {
     try {
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
       const queryParams = new URLSearchParams({
         project_id: project_id || '',
         event: event,
@@ -883,50 +463,15 @@ server.tool(
         to_date: to_date,
         on: on
       });
-      
       if (workspace_id) queryParams.append('workspace_id', workspace_id);
       if (unit) queryParams.append('unit', unit);
       if (where) queryParams.append('where', where);
-      
-      const url = `https://mixpanel.com/api/query/segmentation/sum?${queryParams.toString()}`;
-      
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`HTTP error! status: ${response.status} - ${errorText}`);
-      }
-      
-      const data = await response.json();
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const url = `${MIXPANEL_API_BASE}/segmentation/sum?${queryParams.toString()}`;
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error: unknown) {
       console.error("Error fetching Mixpanel segmentation sum data:", error);
-      const errorMessage = error instanceof Error ? error.message : String(error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching Mixpanel segmentation sum data: ${errorMessage}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching Mixpanel segmentation sum data", error);
     }
   }
 );
@@ -963,38 +508,26 @@ server.tool(
     filter_by_cohort: z.string().describe("Takes a JSON object with a single key called 'id' whose value is the cohort ID. Example: '{\"id\":12345}'").optional(),
     include_all_users: z.boolean().describe("Only applicable with 'filter_by_cohort' parameter. Default is true").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    distinct_id, 
-    distinct_ids, 
-    data_group_id, 
-    where, 
-    output_properties, 
-    session_id, 
-    page, 
-    behaviors, 
-    as_of_timestamp, 
-    filter_by_cohort, 
-    include_all_users 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    distinct_id,
+    distinct_ids,
+    data_group_id,
+    where,
+    output_properties,
+    session_id,
+    page,
+    behaviors,
+    as_of_timestamp,
+    filter_by_cohort,
+    include_all_users
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with project_id
-      let url = `https://mixpanel.com/api/query/engage?project_id=${project_id}`;
-      
-      // Add optional workspace_id if provided
-      if (workspace_id) {
-        url += `&workspace_id=${workspace_id}`;
-      }
-      
-      // Create form data for POST request
+      let url = `${MIXPANEL_API_BASE}/engage?project_id=${project_id}`;
+      if (workspace_id) url += `&workspace_id=${workspace_id}`;
+
       const formData = new URLSearchParams();
-      
-      // Add optional parameters to form data if they exist
       if (distinct_id) formData.append('distinct_id', distinct_id);
       if (distinct_ids) formData.append('distinct_ids', distinct_ids);
       if (data_group_id) formData.append('data_group_id', data_group_id);
@@ -1006,46 +539,19 @@ server.tool(
       if (as_of_timestamp !== undefined) formData.append('as_of_timestamp', as_of_timestamp.toString());
       if (filter_by_cohort) formData.append('filter_by_cohort', filter_by_cohort);
       if (include_all_users !== undefined) formData.append('include_all_users', include_all_users.toString());
-      
-      // Set up request options
-      const options = {
+
+      const data = await mixpanelFetch(url, {
         method: 'POST',
         headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`,
+          ...buildAuthHeaders(),
           'content-type': 'application/x-www-form-urlencoded'
         },
         body: formData
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      });
+      return successResponse(data);
     } catch (error) {
       console.error('Error querying profiles:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error querying profiles: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error querying profiles", error);
     }
   }
 );
@@ -1072,70 +578,30 @@ server.tool(
     on: z.string().describe("The property expression to segment the second event on").optional(),
     limit: z.number().describe("Return the top limit segmentation values. This parameter does nothing if 'on' is not specified").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    from_date, 
-    to_date, 
-    unit, 
-    addiction_unit, 
-    event, 
-    where, 
-    on, 
-    limit 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    from_date,
+    to_date,
+    unit,
+    addiction_unit,
+    event,
+    where,
+    on,
+    limit
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/retention/addiction?project_id=${project_id}&from_date=${from_date}&to_date=${to_date}&unit=${unit}&addiction_unit=${addiction_unit}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/retention/addiction?project_id=${project_id}&from_date=${from_date}&to_date=${to_date}&unit=${unit}&addiction_unit=${addiction_unit}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (event) url += `&event=${encodeURIComponent(event)}`;
       if (where) url += `&where=${encodeURIComponent(where)}`;
       if (on) url += `&on=${encodeURIComponent(on)}`;
       if (limit !== undefined) url += `&limit=${limit}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error querying frequency report:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error querying frequency report: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error querying frequency report", error);
     }
   }
 );
@@ -1164,29 +630,22 @@ server.tool(
     type: z.enum(["general", "unique", "average"]).describe("The type of analysis to perform, either general, unique, or average, defaults to general").optional(),
     format: z.enum(["csv"]).describe("Can be set to 'csv'").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    event, 
-    from_date, 
-    to_date, 
-    on, 
-    unit, 
-    interval, 
-    where, 
-    limit, 
-    type, 
-    format 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    event,
+    from_date,
+    to_date,
+    on,
+    unit,
+    interval,
+    where,
+    limit,
+    type,
+    format
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/segmentation?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/segmentation?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (on) url += `&on=${encodeURIComponent(on)}`;
       if (unit) url += `&unit=${unit}`;
@@ -1195,36 +654,11 @@ server.tool(
       if (limit !== undefined) url += `&limit=${limit}`;
       if (type) url += `&type=${type}`;
       if (format) url += `&format=${format}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error querying segmentation report:', error);
-      throw error;
+      return errorResponse("Error querying segmentation report", error);
     }
   }
 );
@@ -1250,68 +684,28 @@ server.tool(
                 | <unary op> ::= '-' | 'not'`),
     type: z.enum(["general", "unique", "average"]).describe("The type of analysis to perform, either general, unique, or average, defaults to general").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    event, 
-    from_date, 
-    to_date, 
-    on, 
-    unit, 
-    where, 
-    type 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    event,
+    from_date,
+    to_date,
+    on,
+    unit,
+    where,
+    type
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/segmentation/numeric?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}&on=${encodeURIComponent(on)}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/segmentation/numeric?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}&on=${encodeURIComponent(on)}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (unit) url += `&unit=${unit}`;
       if (where) url += `&where=${encodeURIComponent(where)}`;
       if (type) url += `&type=${type}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error querying segmentation bucket:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error querying segmentation bucket: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error querying segmentation bucket", error);
     }
   }
 );
@@ -1336,67 +730,26 @@ server.tool(
                   '>' | '>=' | '<' | '<=' | 'in' | 'and' | 'or'
                 | <unary op> ::= '-' | 'not'`).optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    event, 
-    from_date, 
-    to_date, 
-    on, 
-    unit, 
-    where 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    event,
+    from_date,
+    to_date,
+    on,
+    unit,
+    where
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/segmentation/average?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}&on=${encodeURIComponent(on)}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/segmentation/average?project_id=${project_id}&event=${encodeURIComponent(event)}&from_date=${from_date}&to_date=${to_date}&on=${encodeURIComponent(on)}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (unit) url += `&unit=${unit}`;
       if (where) url += `&where=${encodeURIComponent(where)}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ],
-        isError: true
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error querying segmentation average:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error querying segmentation average: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error querying segmentation average", error);
     }
   }
 );
@@ -1410,61 +763,21 @@ server.tool(
     event: z.string().describe("The event that you wish to get data for. Note: this is a single event name, not an array"),
     limit: z.number().describe("The maximum number of properties to return. Defaults to 10").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    event, 
-    limit 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    event,
+    limit
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/events/properties/top?project_id=${project_id}&event=${encodeURIComponent(event)}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/events/properties/top?project_id=${project_id}&event=${encodeURIComponent(event)}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (limit !== undefined) url += `&limit=${limit}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error fetching top event properties:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching top event properties: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching top event properties", error);
     }
   }
 );
@@ -1479,62 +792,22 @@ server.tool(
     name: z.string().describe("The name of the property you would like to get data for"),
     limit: z.number().describe("The maximum number of values to return. Defaults to 255").optional(),
   },
-  async ({ 
-    project_id = DEFAULT_PROJECT_ID, 
-    workspace_id, 
-    event, 
+  async ({
+    project_id = DEFAULT_PROJECT_ID,
+    workspace_id,
+    event,
     name,
-    limit 
+    limit
   }) => {
     try {
-      // Create authorization header using base64 encoding of credentials
-      const credentials = `${SERVICE_ACCOUNT_USER_NAME}:${SERVICE_ACCOUNT_PASSWORD}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      
-      // Construct base URL with required parameters
-      let url = `https://mixpanel.com/api/query/events/properties/values?project_id=${project_id}&event=${encodeURIComponent(event)}&name=${encodeURIComponent(name)}`;
-      
-      // Add optional parameters if they exist
+      let url = `${MIXPANEL_API_BASE}/events/properties/values?project_id=${project_id}&event=${encodeURIComponent(event)}&name=${encodeURIComponent(name)}`;
       if (workspace_id) url += `&workspace_id=${workspace_id}`;
       if (limit !== undefined) url += `&limit=${limit}`;
-      
-      // Set up request options
-      const options = {
-        method: 'GET',
-        headers: {
-          'accept': 'application/json',
-          'authorization': `Basic ${encodedCredentials}`
-        }
-      };
-      
-      // Make the API request
-      const response = await fetch(url, options);
-      
-      if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`API request failed with status ${response.status}: ${errorText}`);
-      }
-      
-      const data = await response.json();
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(data)
-          }
-        ]
-      };
+      const data = await mixpanelFetch(url);
+      return successResponse(data);
     } catch (error) {
       console.error('Error fetching top event property values:', error);
-      return {
-        content: [
-          {
-            type: "text",
-            text: `Error fetching top event property values: ${error}`
-          }
-        ],
-        isError: true
-      };
+      return errorResponse("Error fetching top event property values", error);
     }
   }
 );
